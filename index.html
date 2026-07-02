@@ -710,6 +710,17 @@ h1{font-size:clamp(28px,4vw,40px);font-weight:900;letter-spacing:-.04em}
           </div>
         </div>
       </div>
+
+      <!-- Activation Duration -->
+      <div class="defaults-group">
+        <div class="defaults-label" data-i18n="defaultsActivationDuration">Ventana de Activación de Adhesivo</div>
+        <div class="defaults-inputs">
+          <div class="defaults-field">
+            <input type="number" step="1" min="1" id="defaultActivationDuration" class="defaults-input">
+            <span class="defaults-unit">s</span>
+          </div>
+        </div>
+      </div>
     </div>
     
     <div class="modal-footer">
@@ -767,6 +778,8 @@ const I18N={
     resultFail:(min,label)=>`No todos los termopares alcanzaron la temperatura mínima de ${min}°C del adhesivo ${label}.`,
     resultOutTitle:'⚠ Ventana de activación fuera de rango',
     resultOut:(t,dur,min,max)=>`La activación inició en t=${t}s, pero durante la ventana de ${dur}s algunos termopares salieron del rango ${min}°C – ${max}°C.`,
+    resultDurationTitle:'⚠ Duración de activación insuficiente',
+    resultDuration:(t,dur,sustained,min,max)=>`La activación inició en t=${t}s, pero no se mantuvo durante los ${dur}s requeridos: solo se alcanzaron ${sustained}s dentro del rango ${min}°C – ${max}°C.`,
     // Cooling result
     coolingResultTitle:'✓ Enfriamiento correcto',
     coolingResult:(time,target)=>`La pieza alcanzó el correcto enfriamiento (${target}°C) ${time}s después de haber iniciado el ciclo de cooling.`,
@@ -835,6 +848,7 @@ const I18N={
     defaultsTempMin:'Temp Mín',
     defaultsTempMax:'Temp Máx',
     defaultsCoolingTarget:'Temp Objetivo Cooling',
+    defaultsActivationDuration:'Ventana de Activación de Adhesivo',
     defaultsReset:'Restaurar valores de fábrica',
     defaultsSave:'Guardar',
     defaultsCancel:'Cancelar',
@@ -886,6 +900,8 @@ const I18N={
     resultFail:(min,label)=>`Not all thermocouples reached the minimum temperature of ${min}°C for ${label} adhesive.`,
     resultOutTitle:'⚠ Activation window out of range',
     resultOut:(t,dur,min,max)=>`Activation started at t=${t}s, but during the ${dur}s window some thermocouples went outside the ${min}°C – ${max}°C range.`,
+    resultDurationTitle:'⚠ Insufficient activation duration',
+    resultDuration:(t,dur,sustained,min,max)=>`Activation started at t=${t}s, but did not hold for the required ${dur}s: only ${sustained}s were sustained within the ${min}°C – ${max}°C range.`,
     // Cooling result
     coolingResultTitle:'✓ Correct cooling achieved',
     coolingResult:(time,target)=>`The part reached correct cooling (${target}°C) ${time}s after the cooling cycle started.`,
@@ -954,6 +970,7 @@ const I18N={
     defaultsTempMin:'Min Temp',
     defaultsTempMax:'Max Temp',
     defaultsCoolingTarget:'Cooling Target Temp',
+    defaultsActivationDuration:'Adhesive Activation Window',
     defaultsReset:'Restore factory values',
     defaultsSave:'Save',
     defaultsCancel:'Cancel',
@@ -1052,7 +1069,8 @@ function openDefaultsModal(){
   document.getElementById('defaultHotmeltMin').value=currentDefaults.hotmelt.min;
   document.getElementById('defaultHotmeltMax').value=currentDefaults.hotmelt.max;
   document.getElementById('defaultCoolingTarget').value=currentDefaults.coolingTarget;
-  
+  document.getElementById('defaultActivationDuration').value=currentDefaults.activationDuration;
+
   modal.classList.add('active');
 }
 
@@ -1075,15 +1093,17 @@ function saveDefaults(){
       min:parseFloat(document.getElementById('defaultHotmeltMin').value)||60,
       max:parseFloat(document.getElementById('defaultHotmeltMax').value)||80
     },
-    coolingTarget:parseFloat(document.getElementById('defaultCoolingTarget').value)||35
+    coolingTarget:parseFloat(document.getElementById('defaultCoolingTarget').value)||35,
+    activationDuration:Math.max(1,parseInt(document.getElementById('defaultActivationDuration').value,10)||30)
   };
-  
+
   // Save to localStorage
   localStorage.setItem('bondlineDefaults',JSON.stringify(newDefaults));
-  
+
   // Update current defaults
   currentDefaults=newDefaults;
-  
+  ACTIVATION_DURATION=currentDefaults.activationDuration;
+
   // Update UI
   updateAdhesiveInfo();
   
@@ -1097,14 +1117,22 @@ function saveDefaults(){
 function resetDefaults(){
   if(confirm(currentLang==='es'?'¿Restaurar valores de fábrica?':'Restore factory values?')){
     currentDefaults={...FACTORY_DEFAULTS};
+    ACTIVATION_DURATION=currentDefaults.activationDuration;
     localStorage.setItem('bondlineDefaults',JSON.stringify(currentDefaults));
-    
+
     // Update inputs
     document.getElementById('defaultWaterBaseMin').value=currentDefaults.waterbase.min;
     document.getElementById('defaultWaterBaseMax').value=currentDefaults.waterbase.max;
     document.getElementById('defaultHotmeltMin').value=currentDefaults.hotmelt.min;
     document.getElementById('defaultHotmeltMax').value=currentDefaults.hotmelt.max;
     document.getElementById('defaultCoolingTarget').value=currentDefaults.coolingTarget;
+    document.getElementById('defaultActivationDuration').value=currentDefaults.activationDuration;
+
+    // Update UI
+    updateAdhesiveInfo();
+
+    // Re-render chart if data exists
+    if(parsedData)renderChart();
   }
 }
 
@@ -1177,7 +1205,8 @@ let sheetConfigs={}; // Configuraciones por hoja
 const FACTORY_DEFAULTS={
   waterbase:{min:55,max:75},
   hotmelt:{min:60,max:80},
-  coolingTarget:35
+  coolingTarget:35,
+  activationDuration:30
 };
 
 // Load defaults from localStorage or use factory defaults
@@ -1185,7 +1214,9 @@ function loadDefaults(){
   const stored=localStorage.getItem('bondlineDefaults');
   if(stored){
     try{
-      return JSON.parse(stored);
+      // Merge con FACTORY_DEFAULTS para rellenar claves nuevas (ej. activationDuration)
+      // que no existan aún en configuraciones guardadas previamente
+      return {...FACTORY_DEFAULTS,...JSON.parse(stored)};
     }catch(e){
       return {...FACTORY_DEFAULTS};
     }
@@ -1204,7 +1235,9 @@ function getAdhesiveConfig(){
 }
 
 const SUBSTRATE_INFO={pcabs:{label:'PC-ABS'},pp:{label:'PP'}};
-const ACTIVATION_DURATION=30;
+// Duración (en segundos) que el adhesivo debe mantenerse dentro de rango para considerarse activado.
+// Configurable por proyecto desde el menú hamburguesa > Valores Default.
+let ACTIVATION_DURATION=currentDefaults.activationDuration;
 const TC_COLORS=['#4f8cff','#ef5b67','#43b36b','#8b5cf6','#f59e0b','#06b6d4','#ec4899','#84cc16','#f43f5e','#14b8a6','#6366f1','#d97706','#0ea5e9','#e11d48','#10b981','#a855f7','#ca8a04','#0891b2','#be185d','#3b82f6'];
 
 function updateAdhesiveInfo(){
@@ -1794,24 +1827,30 @@ function renderChart(){
   const activationEnd=activationStart!==null?activationStart+ACTIVATION_DURATION:null;
 
   let allInRange=false;
+  // Segundos consecutivos que la activación se mantuvo dentro de rango (Y), calculado
+  // sobre los datos completos independientemente del recorte de rango temporal visible.
+  let sustainedSeconds=0;
   if(activationStart!==null){
     // Verificar si la ventana de activación está COMPLETAMENTE dentro del rango visible
     const windowFullyVisible=activationStart>=effectiveStart&&activationEnd<=effectiveEnd;
-    
-    if(windowFullyVisible){
-      // Solo validar si la ventana completa está visible
-      allInRange=true;
-      const end=Math.min(activationEnd,totalRows);
-      for(let r=activationStart;r<end;r++){
-        for(let c=0;c<columns.length;c++){
-          const v=columns[c][r];
-          if(v===null||v<cfg.min||v>cfg.max){
-            allInRange=false;
-            break;
-          }
+
+    const scanEnd=Math.min(activationEnd,totalRows);
+    for(let r=activationStart;r<scanEnd;r++){
+      let rowOk=true;
+      for(let c=0;c<columns.length;c++){
+        const v=columns[c][r];
+        if(v===null||v<cfg.min||v>cfg.max){
+          rowOk=false;
+          break;
         }
-        if(!allInRange)break;
       }
+      if(rowOk)sustainedSeconds++;
+      else break;
+    }
+
+    if(windowFullyVisible){
+      // Solo se considera OK si la ventana completa está visible y se sostuvo todo ACTIVATION_DURATION
+      allInRange=sustainedSeconds>=ACTIVATION_DURATION;
     }else{
       // Si el rango temporal corta la ventana de activación, marcar como NOK
       allInRange=false;
@@ -1859,6 +1898,10 @@ function renderChart(){
   const isHM=adhesiveType==='hotmelt';
   const lc=isHM?(dark?'rgba(248,184,79,':'rgba(245,158,11,'):(dark?'rgba(34,211,238,':'rgba(6,182,212,');
   const gc=dark?'rgba(89,201,127,':'rgba(67,179,107,';
+  const rc=dark?'rgba(255,118,131,':'rgba(239,91,103,';
+  // Rojo cuando no se sostienen los "X" segundos requeridos (solo se alcanzaron "Y")
+  const durationInsufficient=activationStart!==null&&sustainedSeconds<ACTIVATION_DURATION;
+  const wc=durationInsufficient?rc:gc;
 
   const annotations={
     minLine:{type:'line',yMin:cfg.min,yMax:cfg.min,borderColor:lc+'0.8)',borderWidth:2,borderDash:[8,4],label:{display:true,content:T('annotMin',cfg.min),position:'start',backgroundColor:lc+'0.60)',color:lc+'1)',font:{size:11,weight:'700'},padding:{top:4,bottom:4,left:8,right:8},borderRadius:8,yAdjust:15}},
@@ -1868,7 +1911,7 @@ function renderChart(){
     // Ajustar posiciones de la ventana de activación según el offset
     const adjustedActivationStart=activationStart-effectiveStart;
     const adjustedActivationEnd=activationEnd-effectiveStart;
-    
+
     // Solo mostrar si la ventana está al menos parcialmente visible
     if(adjustedActivationEnd>=0&&adjustedActivationStart<effectiveRows){
       annotations.activationWindow={
@@ -1877,18 +1920,18 @@ function renderChart(){
         xMax:Math.min(effectiveRows-1,adjustedActivationEnd),
         yMin:cfg.min,
         yMax:cfg.max,
-        backgroundColor:gc+'0.08)',
-        borderColor:gc+'0.45)',
+        backgroundColor:wc+'0.08)',
+        borderColor:wc+'0.45)',
         borderWidth:2,
         borderDash:[6,3],
         label:{
           display:true,
           content:T('annotWindow',ACTIVATION_DURATION),
           position:{x:'center',y:'start'},
-          color:dark?'#9ae5b1':'#217543',
+          color:durationInsufficient?(dark?'#ffb0ba':'#b82c3f'):(dark?'#9ae5b1':'#217543'),
           font:{size:11,weight:'800'},
           padding:{top:4,bottom:4,left:8,right:8},
-          backgroundColor:gc+'0.14)',
+          backgroundColor:wc+'0.14)',
           borderRadius:8
         }
       };
@@ -2126,6 +2169,10 @@ function renderChart(){
   }else if(allInRange){
     resultEl.className='activation-result pass';
     resultEl.innerHTML=`<div class="result-title">${T('resultPassTitle')}</div>${T('resultPass',cfg.min,displayActivationStart,ACTIVATION_DURATION,cfg.max)}`;
+  }else if(sustainedSeconds<ACTIVATION_DURATION){
+    // No se alcanzaron los X segundos requeridos: se informa cuántos segundos (Y) sí se sostuvieron
+    resultEl.className='activation-result fail';
+    resultEl.innerHTML=`<div class="result-title">${T('resultDurationTitle')}</div>${T('resultDuration',displayActivationStart,ACTIVATION_DURATION,sustainedSeconds,cfg.min,cfg.max)}`;
   }else{
     resultEl.className='activation-result fail';
     resultEl.innerHTML=`<div class="result-title">${T('resultOutTitle')}</div>${T('resultOut',displayActivationStart,ACTIVATION_DURATION,cfg.min,cfg.max)}`;
@@ -2235,7 +2282,22 @@ function downloadChart(){
   columns.forEach(col=>col.forEach(v=>{if(v!==null){if(v>maxTemp)maxTemp=v;if(v<minTemp)minTemp=v;}}));
   let activationStart=null;
   for(let r=0;r<totalRows;r++){if(columns.every(col=>col[r]!==null&&col[r]>=cfg.min)){activationStart=r;break;}}
-  
+
+  // Segundos consecutivos sostenidos dentro de rango desde activationStart (Y)
+  let sustainedSeconds=0;
+  if(activationStart!==null){
+    const scanEnd=Math.min(activationStart+ACTIVATION_DURATION,totalRows);
+    for(let r=activationStart;r<scanEnd;r++){
+      let rowOk=true;
+      for(let c=0;c<columns.length;c++){
+        const v=columns[c][r];
+        if(v===null||v<cfg.min||v>cfg.max){rowOk=false;break;}
+      }
+      if(rowOk)sustainedSeconds++;
+      else break;
+    }
+  }
+
   const stats=[
     {icon:'TC',label:T('statThermocouples'),value:columns.length,color:dark?'#72a8ff':'#4f8cff'},
     {icon:'⏱',label:T('statDuration'),value:effectiveRows+'s',color:dark?'#a78bfa':'#8b5cf6'},
@@ -2517,6 +2579,10 @@ function downloadChart(){
   
   const lc=isHM?(dark?'rgba(248,184,79,':'rgba(245,158,11,'):(dark?'rgba(34,211,238,':'rgba(6,182,212,');
   const gc=dark?'rgba(89,201,127,':'rgba(67,179,107,';
+  const rc=dark?'rgba(255,118,131,':'rgba(239,91,103,';
+  // Rojo cuando no se sostienen los "X" segundos requeridos (solo se alcanzaron "Y")
+  const durationInsufficient=activationStart!==null&&sustainedSeconds<ACTIVATION_DURATION;
+  const wc=durationInsufficient?rc:gc;
   const annotations={
     minLine:{type:'line',yMin:cfg.min,yMax:cfg.min,borderColor:lc+'0.9)',borderWidth:3,borderDash:[10,5],label:{display:true,content:T('annotMin',cfg.min),position:'start',backgroundColor:lc+'0.60)',color:lc+'1)',font:{size:14,weight:'700'},padding:{top:6,bottom:6,left:10,right:10},borderRadius:8,yAdjust:20}},
     maxLine:{type:'line',yMin:cfg.max,yMax:cfg.max,borderColor:lc+'0.9)',borderWidth:3,borderDash:[10,5],label:{display:true,content:T('annotMax',cfg.max),position:'start',backgroundColor:lc+'0.60)',color:lc+'1)',font:{size:14,weight:'700'},padding:{top:6,bottom:6,left:10,right:10},borderRadius:8,yAdjust:-20}}
@@ -2526,10 +2592,10 @@ function downloadChart(){
     // Ajustar posiciones según offset
     const adjustedActivationStart=activationStart-effectiveStart;
     const adjustedActivationEnd=activationEnd-effectiveStart;
-    
+
     // Solo mostrar si está dentro del rango visible
     if(adjustedActivationEnd>=0&&adjustedActivationStart<effectiveRows){
-      annotations.activationWindow={type:'box',xMin:Math.max(0,adjustedActivationStart),xMax:Math.min(effectiveRows-1,adjustedActivationEnd),yMin:cfg.min,yMax:cfg.max,backgroundColor:gc+'0.12)',borderColor:gc+'0.6)',borderWidth:3,borderDash:[8,4],label:{display:true,content:T('annotWindow',ACTIVATION_DURATION),position:{x:'center',y:'start'},color:dark?'#9ae5b1':'#217543',font:{size:14,weight:'800'},padding:{top:5,bottom:5,left:10,right:10},backgroundColor:gc+'0.18)',borderRadius:8}};
+      annotations.activationWindow={type:'box',xMin:Math.max(0,adjustedActivationStart),xMax:Math.min(effectiveRows-1,adjustedActivationEnd),yMin:cfg.min,yMax:cfg.max,backgroundColor:wc+'0.12)',borderColor:wc+'0.6)',borderWidth:3,borderDash:[8,4],label:{display:true,content:T('annotWindow',ACTIVATION_DURATION),position:{x:'center',y:'start'},color:durationInsufficient?(dark?'#ffb0ba':'#b82c3f'):(dark?'#9ae5b1':'#217543'),font:{size:14,weight:'800'},padding:{top:5,bottom:5,left:10,right:10},backgroundColor:wc+'0.18)',borderRadius:8}};
     }
   }
   
